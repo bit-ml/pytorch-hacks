@@ -1,4 +1,10 @@
-"""This script demonstrates multi-process optimization using Adam or RMSprop.
+"""This script demonstrates multi-process optimization using one of
+the following:
+ - Adam
+ - RMSprop
+ - Rprop
+ - Adadelta
+ - Adagrad
 
 The async version uses locks in order to replicate the serial
 behaviour. Real algorithms probably won't use those locks!
@@ -350,7 +356,9 @@ def train_multi_process(initial_parameters, inputs, targets, args):
 def main():
     parser = ArgumentParser()
     parser.add_argument("-a", "--algorithm", default="Adam", dest="algorithm",
-                        choices=["RMSprop", "Adam"], help="Optimizer to use.")
+                        choices=["RMSprop", "Adam", "Adadelta", "Adagrad",
+                                 "Rprop"],
+                        help="Optimizer to use.")
     parser.add_argument("-s", "--steps-no", default=1000, dest="steps_no",
                         type=int, help="Number of optimization steps")
     parser.add_argument("-i", "--in-size", default=256, dest="in_size",
