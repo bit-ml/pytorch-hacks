@@ -48,6 +48,56 @@ def show_state_summary(optimizer):
     sys.stdout.write("\n")
     sys.stdout.flush()
 
+def train_single_process(initial_parameters, inputs, targets, args):
+
+    torch.manual_seed(1)
+
+    IN_SIZE = args.in_size
+    OUT_SIZE = args.out_size
+    STEPS_NO = args.steps_no
+
+    my_model = SimpleModel(IN_SIZE, OUT_SIZE)
+    if args.gpu:
+        my_model.cuda()
+
+    my_model.load_state_dict(initial_parameters)
+
+    adam_optimizer = getattr(optim, args.algorithm)(my_model.parameters())
+
+    sys.stdout.write("Initial parameters:")
+    show_parameters_summary(my_model)
+
+    sys.stdout.write("\n --------- MODEL ---------\n\n")
+
+    for step in range(STEPS_NO):
+        if args.verbose:
+            sys.stdout.write(" ---> STEP {:d} <--- \n".format(step))
+
+        adam_optimizer.zero_grad()
+        x = Variable(inputs[step])
+        y = my_model(x)
+        t = Variable(targets[step], requires_grad=False)
+        loss = F.smooth_l1_loss(y, t)
+        loss.backward()
+        adam_optimizer.step()
+
+        if args.verbose:
+            sys.stdout.write("Loss @ step {:d}: {:f}\n".format(step,
+                                                               loss.data[0]))
+
+            sys.stdout.write("Optimizer state after step {:d}:\n".format(step))
+            show_state_summary(adam_optimizer)
+
+            sys.stdout.write("Params after step {:d}:".format(step))
+            show_parameters_summary(my_model)
+
+    sys.stdout.write("Params after training:")
+    show_parameters_summary(my_model)
+
+
+
+
+
 
 def to_shared_state(state):
     """Takes an optimizer state, puts scalars in mp.Value and shares tensors."""
@@ -218,114 +268,26 @@ class Worker(mp.Process):
                 crt_step.value += 1
 
 
-if __name__ == "__main__":
-
-    parser = ArgumentParser()
-    parser.add_argument("-a", "--algorithm", default="Adam", dest="algorithm",
-                        choices=["RMSprop", "Adam"], help="Optimizer to use.")
-    parser.add_argument("-s", "--steps-no", default=1000, dest="steps_no",
-                        type=int, help="Number of optimization steps")
-    parser.add_argument("-i", "--in-size", default=256, dest="in_size",
-                        type=int, help="Size of input vectors")
-    parser.add_argument("-o", "--out-size", default=128, dest="out_size",
-                        type=int, help="Size of output vectors")
-    parser.add_argument("-b", "--batch-size", default=64, dest="batch_size",
-                        type=int, help="Batch size")
-    parser.add_argument("-w", "--workers-no", default=8, dest="workers_no",
-                        type=int, help="Number of processes")
-    parser.add_argument("-v", "--verbose", action='count',
-                        help="Verbosity level")
-    parser.add_argument("-g", "--gpu", action='store_true', help="Use GPU")
-
-
-    args = parser.parse_args()
-
-    STEPS_NO = args.steps_no
-    BATCH_SIZE = args.batch_size
-    IN_SIZE = args.in_size
-    OUT_SIZE = args.out_size
-
-    Optimizer = getattr(optim, args.algorithm)
-
-    if args.gpu:
-        mp.set_start_method('spawn')
-
-    # Create some data to work with
-
-    torch.manual_seed(1)
-
-    f = nn.Linear(IN_SIZE, OUT_SIZE)
-
-    inputs = torch.randn(STEPS_NO, BATCH_SIZE, IN_SIZE)
-    targets = F.tanh(f(Variable(inputs.view(-1, IN_SIZE), volatile=True)))
-    targets = targets.data.view(STEPS_NO, BATCH_SIZE, OUT_SIZE)
-
-
-    if args.gpu:
-        inputs = inputs.cuda()
-        targets = targets.cuda()
-
-
-    # ------------------------------
-    # Initialize model and optimizer
-
-    torch.manual_seed(1)
-
-    my_model = SimpleModel(IN_SIZE, OUT_SIZE)
-    if args.gpu:
-        my_model.cuda()
-
-    original_parameters = deepcopy(my_model.state_dict())
-    adam_optimizer = Optimizer(my_model.parameters())
-
-
-    sys.stdout.write("Initial parameters:")
-    show_parameters_summary(my_model)
-
-    sys.stdout.write("\n --------- MODEL ---------\n\n")
-
-
-    for step in range(STEPS_NO):
-        if args.verbose:
-            sys.stdout.write(" ---> STEP {:d} <--- \n".format(step))
-
-        adam_optimizer.zero_grad()
-        x = Variable(inputs[step])
-        y = my_model(x)
-        t = Variable(targets[step], requires_grad=False)
-        loss = F.smooth_l1_loss(y, t)
-        loss.backward()
-        adam_optimizer.step()
-
-        if args.verbose:
-            sys.stdout.write("Loss @ step {:d}: {:f}\n".format(step,
-                                                               loss.data[0]))
-
-            sys.stdout.write("Optimizer state after step {:d}:\n".format(step))
-            show_state_summary(adam_optimizer)
-
-            sys.stdout.write("Params after step {:d}:".format(step))
-            show_parameters_summary(my_model)
-
-    sys.stdout.write("Params after training:")
-    show_parameters_summary(my_model)
-
-
+def train_multi_process(initial_parameters, inputs, targets, args):
 
     # ---------------------------------------------------------------------
     # Start some threads that will train the a third model on the same data
-
 
     WORKERS_NO = args.workers_no
     crt_step = mp.Value('i', 1)
     lock = mp.Lock()
 
+    IN_SIZE = args.in_size
+    OUT_SIZE = args.out_size
+    STEPS_NO = args.steps_no
+
     shared_model = SimpleModel(IN_SIZE, OUT_SIZE)
     if args.gpu:
         shared_model.cuda()
-    main_optimizer = Optimizer(shared_model.parameters())
 
-    shared_model.load_state_dict(original_parameters)
+    main_optimizer = getattr(optim, args.algorithm)(shared_model.parameters())
+
+    shared_model.load_state_dict(initial_parameters)
     shared_model.share_memory()
 
     inputs.share_memory_()
@@ -384,3 +346,60 @@ if __name__ == "__main__":
     sys.stdout.write("Params after training:")
     show_parameters_summary(shared_model)
     sys.stdout.flush()
+
+def main():
+    parser = ArgumentParser()
+    parser.add_argument("-a", "--algorithm", default="Adam", dest="algorithm",
+                        choices=["RMSprop", "Adam"], help="Optimizer to use.")
+    parser.add_argument("-s", "--steps-no", default=1000, dest="steps_no",
+                        type=int, help="Number of optimization steps")
+    parser.add_argument("-i", "--in-size", default=256, dest="in_size",
+                        type=int, help="Size of input vectors")
+    parser.add_argument("-o", "--out-size", default=128, dest="out_size",
+                        type=int, help="Size of output vectors")
+    parser.add_argument("-b", "--batch-size", default=64, dest="batch_size",
+                        type=int, help="Batch size")
+    parser.add_argument("-w", "--workers-no", default=8, dest="workers_no",
+                        type=int, help="Number of processes")
+    parser.add_argument("-v", "--verbose", action='count',
+                        help="Verbosity level")
+    parser.add_argument("-g", "--gpu", action='store_true', help="Use GPU")
+
+
+    args = parser.parse_args()
+
+    STEPS_NO = args.steps_no
+    BATCH_SIZE = args.batch_size
+    IN_SIZE = args.in_size
+    OUT_SIZE = args.out_size
+
+
+    if args.gpu:
+        mp.set_start_method('spawn')
+
+    # Create some data to work with
+
+    torch.manual_seed(1)
+
+    f = nn.Linear(IN_SIZE, OUT_SIZE)
+
+    inputs = torch.randn(STEPS_NO, BATCH_SIZE, IN_SIZE)
+    targets = F.tanh(f(Variable(inputs.view(-1, IN_SIZE), volatile=True)))
+    targets = targets.data.view(STEPS_NO, BATCH_SIZE, OUT_SIZE)
+
+    if args.gpu:
+        inputs = inputs.cuda()
+        targets = targets.cuda()
+
+    my_model = SimpleModel(IN_SIZE, OUT_SIZE)
+    if args.gpu:
+        my_model.cuda()
+
+    initial_parameters = my_model.state_dict()
+    del my_model
+
+    train_single_process(deepcopy(initial_parameters), inputs, targets, args)
+    train_multi_process(deepcopy(initial_parameters), inputs, targets, args)
+
+if __name__ == "__main__":
+    main()
