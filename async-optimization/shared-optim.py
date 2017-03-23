@@ -2,6 +2,7 @@
 
 The async version uses locks in order to replicate the serial
 behaviour. Real algorithms probably won't use those locks!
+
 """
 
 import torch
@@ -16,6 +17,8 @@ from copy import deepcopy
 from argparse import ArgumentParser
 
 class SimpleModel(nn.Module):
+    """A 2-layer neural network."""
+
     def __init__(self, in_size, out_size):
         super(SimpleModel, self).__init__()
         h_size = in_size + (out_size - in_size) // 2
@@ -26,22 +29,29 @@ class SimpleModel(nn.Module):
         return F.tanh(self.l2(F.relu(self.l1(inputs))))
 
 def show_parameters_summary(model):
+    """Displays a fingerprint of the parameters of a given model."""
+
     for name, p in model.state_dict().items():
         sys.stdout.write(" | {:s} : {:f}".format(name, p.abs().sum()))
     sys.stdout.write("\n")
     sys.stdout.flush()
 
-def show_state_summary(state):
-    s = state["state"]
+def show_state_summary(optimizer):
+    """Displays a fingerprint of the state of an optimizer."""
+
+    s = optimizer.state_dict()["state"]
     for param, info in s.items():
         sys.stdout.write(" | ".join(["{:s}={:f}".format(
             name, float(x) if not torch.is_tensor(x) else x.abs().sum()
         ) for name, x in info.items()]))
-    sys.stdout.write("\n\n")
+        sys.stdout.write("\n")
+    sys.stdout.write("\n")
     sys.stdout.flush()
 
 
 def to_shared_state(state):
+    """Takes an optimizer state, puts scalars in mp.Value and shares tensors."""
+
     new_state = {}
     for k, v in state.items():
         if type(v) == dict:
@@ -58,6 +68,14 @@ def to_shared_state(state):
     return new_state
 
 def repair_ids(shared_state, original_id_to_label, label_to_id):
+    """Given an optimizer state and some new ids for the parameters,
+    creates a new state with the new ids linked to the same tensors.
+
+    Useful when using an optimizer state used on some old model on a
+    new one.
+
+    """
+
     new_state = {}
     for param_id, state in shared_state.items():
         new_param_id = label_to_id[original_id_to_label[param_id]]
@@ -65,6 +83,10 @@ def repair_ids(shared_state, original_id_to_label, label_to_id):
     return new_state
 
 def from_shared_state(shared_state):
+    """Used on what you get from `to_shared_state`, it only extracts
+    tensors from mp.Value
+
+    """
     new_state = {}
     for param_id, state in shared_state.items():
         new_state[param_id] = {}
@@ -98,33 +120,27 @@ def update_shared_values(optimizer_state, shared_state):
 class Worker(mp.Process):
     def __init__(self, pid, workers_no, shared_stuff):
         super(Worker, self).__init__()
-        self.shared_model = shared_stuff["shared_model"]
-        self.shared_optimizer_state = shared_stuff["shared_optimizer_state"]
-        self.lock = shared_stuff["lock"]
-        self.crt_step = shared_stuff["crt_step"]
-        self.steps_no = shared_stuff["steps_no"]
         self.my_pid = pid
         self.workers_no = workers_no
-        self.inputs = shared_stuff["inputs"]
-        self.targets = shared_stuff["targets"]
-        self.algorithm = shared_stuff["algorithm"]
-        self.verbose = shared_stuff.get("verbose", None)
-        self.original_id_to_label = shared_stuff["original_id_to_label"]
+        self.shared_stuff = shared_stuff
 
     def run(self):
 
-        steps_no, workers_no = self.steps_no, self.workers_no
-        crt_step = self.crt_step
+        shared_model = self.shared_stuff["shared_model"]
+        shared_optimizer_state = self.shared_stuff["shared_optimizer_state"]
+        lock = self.shared_stuff["lock"]
+        crt_step = self.shared_stuff["crt_step"]
+        steps_no = self.shared_stuff["steps_no"]
+        inputs = self.shared_stuff["inputs"]
+        targets = self.shared_stuff["targets"]
+        algorithm = self.shared_stuff["algorithm"]
+        verbose = self.shared_stuff.get("verbose", None)
+        original_id_to_label = self.shared_stuff["original_id_to_label"]
+
+        workers_no = self.workers_no
         my_pid = self.my_pid
-        verbose = self.verbose
-        lock = self.lock
-        shared_model = self.shared_model
-        shared_state = self.shared_optimizer_state
 
-        inputs, targets = self.inputs, self.targets
-
-        Optimizer = getattr(optim, self.algorithm)
-        my_optimizer = Optimizer(shared_model.parameters())
+        my_optimizer = getattr(optim, algorithm)(shared_model.parameters())
 
         # Decouple gradients
         loss = F.smooth_l1_loss(shared_model(Variable(inputs[0])),
@@ -134,14 +150,13 @@ class Worker(mp.Process):
             p.grad.data = p.grad.data.clone()
 
         # Set initial optimizer state
-        shared_optimizer_state = self.shared_optimizer_state
         p_id = {id(p.data): id(p) for p in shared_model.parameters()}
         label_to_id = \
                 {n: p_id[id(p)] for n, p in shared_model.state_dict().items()}
 
 
         shared_optimizer_state = repair_ids(shared_optimizer_state,
-                                            self.original_id_to_label,
+                                            original_id_to_label,
                                             label_to_id)
         my_state = my_optimizer.state_dict()
         my_state['state'] = from_shared_state(shared_optimizer_state)
@@ -159,6 +174,7 @@ class Worker(mp.Process):
                     sys.stdout.write(
                         "Worker {:d} does step {:d}.\n".format(my_pid, step)
                     )
+
                 update_from_shared_values(my_optimizer.state,
                                           shared_optimizer_state)
 
@@ -166,7 +182,7 @@ class Worker(mp.Process):
                     sys.stdout.write(
                         "Optimizer state before step {:d}:\n".format(step)
                     )
-                    show_state_summary(my_optimizer.state_dict())
+                    show_state_summary(my_optimizer)
                     sys.stdout.write(
                         "Params before step {:d}:".format(step)
                     )
@@ -183,8 +199,7 @@ class Worker(mp.Process):
                 my_optimizer.step()
 
 
-                update_shared_values(my_optimizer.state,
-                                     shared_optimizer_state)
+                update_shared_values(my_optimizer.state, shared_optimizer_state)
 
                 if verbose:
                     sys.stdout.write(
@@ -194,7 +209,7 @@ class Worker(mp.Process):
                     sys.stdout.write(
                         "Optimizer state after step {:d}:\n".format(step)
                     )
-                    show_state_summary(my_optimizer.state_dict())
+                    show_state_summary(my_optimizer)
 
                     sys.stdout.write("Params after step {:d}:".format(step))
                     show_parameters_summary(shared_model)
@@ -203,14 +218,19 @@ class Worker(mp.Process):
                 crt_step.value += 1
 
 
-# Setup the problem
-
 if __name__ == "__main__":
+
     parser = ArgumentParser()
     parser.add_argument("-a", "--algorithm", default="Adam", dest="algorithm",
                         choices=["RMSprop", "Adam"], help="Optimizer to use.")
     parser.add_argument("-s", "--steps-no", default=1000, dest="steps_no",
                         type=int, help="Number of optimization steps")
+    parser.add_argument("-i", "--in-size", default=256, dest="in_size",
+                        type=int, help="Size of input vectors")
+    parser.add_argument("-o", "--out-size", default=128, dest="out_size",
+                        type=int, help="Size of output vectors")
+    parser.add_argument("-b", "--batch-size", default=64, dest="batch_size",
+                        type=int, help="Batch size")
     parser.add_argument("-w", "--workers-no", default=8, dest="workers_no",
                         type=int, help="Number of processes")
     parser.add_argument("-v", "--verbose", action='count',
@@ -221,14 +241,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     STEPS_NO = args.steps_no
-    BATCH_SIZE = 64
-    IN_SIZE = 128
-    OUT_SIZE = 32
+    BATCH_SIZE = args.batch_size
+    IN_SIZE = args.in_size
+    OUT_SIZE = args.out_size
 
     Optimizer = getattr(optim, args.algorithm)
-
-    sys.stdout.write("{:s}---\n".format(__name__))
-    sys.stdout.flush()
 
     if args.gpu:
         mp.set_start_method('spawn')
@@ -262,10 +279,10 @@ if __name__ == "__main__":
     adam_optimizer = Optimizer(my_model.parameters())
 
 
-    sys.stdout.write("Original:")
+    sys.stdout.write("Initial parameters:")
     show_parameters_summary(my_model)
 
-    sys.stdout.write("\n --------- MODEL 1 ---------\n\n")
+    sys.stdout.write("\n --------- MODEL ---------\n\n")
 
 
     for step in range(STEPS_NO):
@@ -285,7 +302,7 @@ if __name__ == "__main__":
                                                                loss.data[0]))
 
             sys.stdout.write("Optimizer state after step {:d}:\n".format(step))
-            show_state_summary(adam_optimizer.state_dict())
+            show_state_summary(adam_optimizer)
 
             sys.stdout.write("Params after step {:d}:".format(step))
             show_parameters_summary(my_model)
@@ -299,7 +316,7 @@ if __name__ == "__main__":
     # Start some threads that will train the a third model on the same data
 
 
-    workers_no = args.workers_no
+    WORKERS_NO = args.workers_no
     crt_step = mp.Value('i', 1)
     lock = mp.Lock()
 
@@ -331,7 +348,7 @@ if __name__ == "__main__":
         sys.stdout.write(
             "Optimizer state after step 0:\n".format(0)
         )
-        show_state_summary(main_optimizer.state_dict())
+        show_state_summary(main_optimizer)
 
         sys.stdout.write("Params after step {:d}:".format(0))
         show_parameters_summary(shared_model)
@@ -356,7 +373,7 @@ if __name__ == "__main__":
         "original_id_to_label": original_id_to_label
     }
 
-    workers = [Worker(i, workers_no, shared_stuff) for i in range(workers_no)]
+    workers = [Worker(i, WORKERS_NO, shared_stuff) for i in range(WORKERS_NO)]
 
     for worker in workers:
         worker.start()
