@@ -1,10 +1,16 @@
 """This script demonstrates multi-process optimization using one of
 the following:
- - Adam
- - RMSprop
- - Rprop
  - Adadelta
  - Adagrad
+ - Adam
+ - ASGD
+ - SGD
+ - Rprop
+ - RMSprop
+
+This script doesn't work with:
+ - LBFGS   - it requires a closure function
+ - Adamax  - uses a new tensor for `exp_inf`
 
 The async version uses locks in order to replicate the serial
 behaviour. Real algorithms probably won't use those locks!
@@ -47,8 +53,8 @@ def show_state_summary(optimizer):
 
     s = optimizer.state_dict()["state"]
     for param, info in s.items():
-        sys.stdout.write(" | ".join(["{:s}={:f}".format(
-            name, float(x) if not torch.is_tensor(x) else x.abs().sum()
+        sys.stdout.write(" | ".join(["{:s}@{:d}={:f}".format(
+            name, id(x), float(x) if not torch.is_tensor(x) else x.abs().sum()
         ) for name, x in info.items()]))
         sys.stdout.write("\n")
     sys.stdout.write("\n")
@@ -68,7 +74,8 @@ def train_single_process(initial_parameters, inputs, targets, args):
 
     my_model.load_state_dict(initial_parameters)
 
-    adam_optimizer = getattr(optim, args.algorithm)(my_model.parameters())
+    optimizer = getattr(optim, args.algorithm)(my_model.parameters(),
+                                               **eval(args.optim_args))
 
     sys.stdout.write("Initial parameters:")
     show_parameters_summary(my_model)
@@ -79,30 +86,26 @@ def train_single_process(initial_parameters, inputs, targets, args):
         if args.verbose:
             sys.stdout.write(" ---> STEP {:d} <--- \n".format(step))
 
-        adam_optimizer.zero_grad()
+        optimizer.zero_grad()
         x = Variable(inputs[step])
         y = my_model(x)
         t = Variable(targets[step], requires_grad=False)
         loss = F.smooth_l1_loss(y, t)
         loss.backward()
-        adam_optimizer.step()
+        optimizer.step()
 
         if args.verbose:
             sys.stdout.write("Loss @ step {:d}: {:f}\n".format(step,
                                                                loss.data[0]))
 
             sys.stdout.write("Optimizer state after step {:d}:\n".format(step))
-            show_state_summary(adam_optimizer)
+            show_state_summary(optimizer)
 
             sys.stdout.write("Params after step {:d}:".format(step))
             show_parameters_summary(my_model)
 
     sys.stdout.write("Params after training:")
     show_parameters_summary(my_model)
-
-
-
-
 
 
 def to_shared_state(state):
@@ -190,13 +193,15 @@ class Worker(mp.Process):
         inputs = self.shared_stuff["inputs"]
         targets = self.shared_stuff["targets"]
         algorithm = self.shared_stuff["algorithm"]
+        optim_args = self.shared_stuff["optim_args"]
         verbose = self.shared_stuff.get("verbose", None)
         original_id_to_label = self.shared_stuff["original_id_to_label"]
 
         workers_no = self.workers_no
         my_pid = self.my_pid
 
-        my_optimizer = getattr(optim, algorithm)(shared_model.parameters())
+        my_optimizer = getattr(optim, algorithm)(shared_model.parameters(),
+                                                 **eval(optim_args))
 
         # Decouple gradients
         loss = F.smooth_l1_loss(shared_model(Variable(inputs[0])),
@@ -254,7 +259,6 @@ class Worker(mp.Process):
                 loss.backward()
                 my_optimizer.step()
 
-
                 update_shared_values(my_optimizer.state, shared_optimizer_state)
 
                 if verbose:
@@ -291,7 +295,8 @@ def train_multi_process(initial_parameters, inputs, targets, args):
     if args.gpu:
         shared_model.cuda()
 
-    main_optimizer = getattr(optim, args.algorithm)(shared_model.parameters())
+    main_optimizer = getattr(optim, args.algorithm)(shared_model.parameters(),
+                                                    **eval(args.optim_args))
 
     shared_model.load_state_dict(initial_parameters)
     shared_model.share_memory()
@@ -337,6 +342,7 @@ def train_multi_process(initial_parameters, inputs, targets, args):
         "steps_no": STEPS_NO,
         "shared_optimizer_state": optimizer_state,
         "algorithm": args.algorithm,
+        "optim_args": args.optim_args,
         "verbose": args.verbose,
         "original_id_to_label": original_id_to_label
     }
@@ -356,8 +362,8 @@ def train_multi_process(initial_parameters, inputs, targets, args):
 def main():
     parser = ArgumentParser()
     parser.add_argument("-a", "--algorithm", default="Adam", dest="algorithm",
-                        choices=["RMSprop", "Adam", "Adadelta", "Adagrad",
-                                 "Rprop"],
+                        help="Optimizer to use.")
+    parser.add_argument("-oa", "--optim-args", default="{}", dest="optim_args",
                         help="Optimizer to use.")
     parser.add_argument("-s", "--steps-no", default=1000, dest="steps_no",
                         type=int, help="Number of optimization steps")
