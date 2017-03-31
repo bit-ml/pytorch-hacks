@@ -206,9 +206,12 @@ class Worker(mp.Process):
         # Decouple gradients
         loss = F.smooth_l1_loss(shared_model(Variable(inputs[0])),
                                 Variable(targets[0], requires_grad=False))
+
         loss.backward()
+
         for p in shared_model.parameters():
             p.grad.data = p.grad.data.clone()
+
 
         # Set initial optimizer state
         p_id = {id(p.data): id(p) for p in shared_model.parameters()}
@@ -388,8 +391,7 @@ def main():
     OUT_SIZE = args.out_size
 
 
-    if args.gpu:
-        mp.set_start_method('spawn')
+    mp.set_start_method('spawn')
 
     # Create some data to work with
 
