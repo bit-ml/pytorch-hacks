@@ -21,23 +21,23 @@ class BilinearResizer(object):
 
         r_idx = torch.linspace(0, o_h - 1, n_h).cuda()
         i_up = torch.floor(r_idx)
-        i_down = torch.ceil(r_idx)
+        i_down = i_up + 1.
         f_down = (r_idx - i_up).view(1, n_h, 1)
         f_up = (i_down - r_idx).view(1, n_h, 1)
 
         self.i_up = i_up.long().cuda()
-        self.i_down = i_down.long().cuda()
+        self.i_down = i_down.clamp(0, o_h - 1).long().cuda()
         self.f_down = f_down.cuda()
         self.f_up = f_up.cuda()
 
         r_idx = torch.linspace(0, o_w - 1, n_w).cuda()
         i_left = torch.floor(r_idx)
-        i_right = torch.ceil(r_idx)
+        i_right = i_left + 1.
         f_left = (r_idx - i_right).view(1, 1, n_w)
         f_right = (i_left - r_idx).view(1, 1, n_w)
 
         self.i_left = i_left.long().cuda()
-        self.i_right = i_right.long().cuda()
+        self.i_right = i_right.clamp(0, o_w - 1).long().cuda()
         self.f_left = f_left.cuda()
         self.f_right = f_right.cuda()
 
@@ -102,12 +102,12 @@ def bl_resize(orig_img, new_size):
 
     r_idx = torch.linspace(0, o_h - 1, n_h).cuda()  # TODO: Try to remove cuda!
     i_up = torch.floor(r_idx)
-    i_down = torch.ceil(r_idx)
+    i_down = i_up + 1.
     f_down = (r_idx - i_up).view(1, n_h, 1)
     f_up = (i_down - r_idx).view(1, n_h, 1)
 
     i_up = i_up.long().cuda()
-    i_down = i_down.long().cuda()
+    i_down = i_down.clamp(0, o_h - 1).long().cuda()
     f_down = f_down.cuda()
     f_up = f_up.cuda()
 
@@ -116,12 +116,12 @@ def bl_resize(orig_img, new_size):
 
     r_idx = torch.linspace(0, o_w - 1, n_w).cuda()  # TODO: Try to remove cuda!
     i_left = torch.floor(r_idx)
-    i_right = torch.ceil(r_idx)
+    i_right = i_left + 1.
     f_left = (r_idx - i_right).view(1, 1, n_w)
     f_right = (i_left - r_idx).view(1, 1, n_w)
 
     i_left = i_left.long().cuda()
-    i_right = i_right.long().cuda()
+    i_right = i_right.clamp(0, o_w - 1).long().cuda()
     f_left = f_left.cuda()
     f_right = f_right.cuda()
 
@@ -148,11 +148,14 @@ def nn_resize(orig_img, new_size):
 
 
 def main():
-    orig_size, new_size = torch.Size([1, 10, 10]), torch.Size([1, 4, 4])
+    orig_size, new_size = torch.Size([1, 7, 7]), torch.Size([1, 5, 5])
     test_img = torch.randn(orig_size).cuda()
 
     bl_img = bl_resize(test_img, new_size)
     nn_img = nn_resize(test_img, new_size)
+
+    print(test_img)
+    print(bl_img)
 
     assert bl_img.size() == new_size and nn_img.size() == new_size
 
